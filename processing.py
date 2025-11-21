@@ -12,18 +12,15 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 # -------------------------------
 # 1. Download video from URL
 # -------------------------------
+import os
+import tempfile
+import requests
+
 def download_video(url: str) -> str:
     tmp_dir = tempfile.mkdtemp()
     out_path = os.path.join(tmp_dir, "video.mp4")
 
-    # Handle YouTube URLs
-    if "youtube.com" in url or "youtu.be" in url:
-        yt = YouTube(url)
-        stream = yt.streams.filter(file_extension="mp4", progressive=True).first()
-        stream.download(output_path=tmp_dir, filename="video.mp4")
-        return out_path
-
-    # Otherwise treat as a direct video URL (e.g., MP4)
+    # Only direct MP4 file URLs are allowed on Streamlit Cloud
     response = requests.get(url, stream=True)
     response.raise_for_status()
 
@@ -33,6 +30,7 @@ def download_video(url: str) -> str:
                 f.write(chunk)
 
     return out_path
+
 
 
 # -------------------------------
