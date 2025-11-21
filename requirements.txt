@@ -1,0 +1,6 @@
+streamlit
+pytube
+moviepy
+openai
+python-dotenv
+requests
