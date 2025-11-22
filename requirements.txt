@@ -1,6 +1,5 @@
 streamlit
-pytube
+groq
 moviepy
-openai
-python-dotenv
+pydub
 requests

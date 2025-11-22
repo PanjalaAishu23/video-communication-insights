@@ -1,81 +1,83 @@
 import os
 import tempfile
 import requests
-from pytube import YouTube
 from moviepy import VideoFileClip
-import openai
-import json
+from pydub import AudioSegment, effects
+from groq import Groq, APIStatusError
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+# 50 seconds per chunk => safe for Whisper request size
+CHUNK_DURATION_MS = 50_000
 
-# -------------------------------
-# 1. Download video from URL
-# -------------------------------
-import os
-import tempfile
-import requests
 
 def download_video(url: str) -> str:
+    """Download video from a direct MP4 URL to a temp file."""
     tmp_dir = tempfile.mkdtemp()
     out_path = os.path.join(tmp_dir, "video.mp4")
 
-    # Only direct MP4 file URLs are allowed on Streamlit Cloud
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
+    r = requests.get(url, stream=True)
+    r.raise_for_status()
 
     with open(out_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
+        for chunk in r.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
 
     return out_path
 
 
+def extract_audio(video_path: str) -> tuple[str, float]:
+    """
+    Extract audio from video into a boosted, normalized WAV.
+    Returns (audio_path, duration_seconds).
+    """
+    tmp_dir = tempfile.mkdtemp()
+    raw_audio = os.path.join(tmp_dir, "raw.wav")
+    clean_audio = os.path.join(tmp_dir, "clean.wav")
 
-# -------------------------------
-# 2. Extract audio from video
-# -------------------------------
-def extract_audio(video_path: str) -> str:
-    audio_path = video_path.replace(".mp4", ".wav")
-    clip = VideoFileClip(video_path)
-    clip.audio.write_audiofile(audio_path)
-    clip.close()
-    return audio_path
+    video = VideoFileClip(video_path)
+    video.audio.write_audiofile(raw_audio, fps=16000, codec="pcm_s16le")
+    duration_sec = video.duration
+
+    audio = AudioSegment.from_wav(raw_audio)
+
+    # Detect very quiet / silent audio
+    if audio.dBFS < -45:
+        raise RuntimeError("Audio seems silent or extremely quiet. Please provide a video with clear speech.")
+
+    # Normalize + lightly boost volume for clarity
+    normalized = effects.normalize(audio)
+    boosted = normalized + 8  # +8 dB
+
+    boosted.export(clean_audio, format="wav")
+    return clean_audio, float(duration_sec)
 
 
-# -------------------------------
-# 3. Transcribe audio using Whisper API
-# -------------------------------
 def transcribe_audio(audio_path: str) -> str:
-    with open(audio_path, "rb") as audio_file:
-        transcript = openai.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
-            file=audio_file,
-            response_format="text"
-        )
-    return transcript
+    """
+    Chunk audio and transcribe using Groq Whisper.
+    This avoids 413 errors and works for long videos.
+    """
+    audio = AudioSegment.from_wav(audio_path)
+    transcript = ""
 
+    for i in range(0, len(audio), CHUNK_DURATION_MS):
+        chunk = audio[i:i + CHUNK_DURATION_MS]
 
-# -------------------------------
-# 4. Analyze transcript with LLM
-# -------------------------------
-def analyze_transcript(transcript: str) -> dict:
-    prompt = f"""
-You are assessing spoken communication quality.
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            chunk.export(tmp.name, format="wav")
 
-Transcript:
-\"\"\"{transcript}\"\"\"
+            with open(tmp.name, "rb") as f:
+                try:
+                    part = client.audio.transcriptions.create(
+                        model="whisper-large-v3-turbo",
+                        file=f,
+                        response_format="text",
+                    )
+                except APIStatusError as e:
+                    raise RuntimeError(f"Transcription failed: {e}")
 
-Return JSON with:
-- clarity_score (0–100)
-- communication_focus (one concise sentence)
-"""
+        transcript += " " + part
 
-    response = openai.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    reply = response.choices[0].message.content
-    return json.loads(reply)
+    return transcript.strip()
